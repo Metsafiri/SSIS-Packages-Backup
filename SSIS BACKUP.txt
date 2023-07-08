@@ -1,0 +1,80 @@
+function Export-SsisPackagesMain
+{
+    [CmdletBinding()]param(
+        [parameter(ValueFromPipeline)]
+        [ValidateScript({Test-Path $_})] 
+        [string]$OutputPath,
+        [string]$DatabaseServerName = ".",
+        [string]$SsisCatalogDatabaseName = "SSISDB"
+    )
+    
+    # Create session working directory
+    $outputDirectoryName = [System.DateTime]::Now.ToString("yyyyMMddHHmmss")
+    $workingPath = Join-Path $OutputPath $outputDirectoryName
+    New-Item -Path $workingPath -ItemType directory -Force | Out-Null
+    
+    # Connect to SQL Server
+    # Assuming Windows Integrated (SSPI) security. 
+    # Need something different? See https://www.connectionstrings.com/sql-server/ for many more examples.
+    $sqlConnectionString =  "Integrated Security=SSPI;Persist Security Info=False;Database=" + $SsisCatalogDatabaseName +
+                            ";Data Source=" + $DatabaseServerName
+
+    $catalogDbConnection = New-Object System.Data.SqlClient.SqlConnection
+    $catalogDbConnection.ConnectionString = $sqlConnectionString
+
+    $sqlCatalogQuery =  "SELECT fld.[name] AS FolderName, proj.[name] AS ProjectName " + 
+                        "FROM [catalog].[projects] AS proj " + 
+                        "INNER JOIN [catalog].[folders] AS fld " +
+                        "ON proj.folder_id = fld.folder_id;"
+
+    $sqlCatalogExport = "EXEC [catalog].[get_project] " +
+                        "@folder_name=@folder, @project_name = @project"
+
+    $zipFilePaths = @()
+
+    try {
+        $catalogDbConnection.Open()
+
+        #Load Catalog Contents from SQL
+        Write-Host "Loading SSIS Catalog Entries" 
+        $cmdCatalogQuery = New-Object System.Data.SqlClient.SqlCommand
+        $cmdCatalogQuery.Connection = $catalogDbConnection
+        $cmdCatalogQuery.CommandText = $sqlCatalogQuery
+
+        $dtCatalog = New-Object System.Data.DataTable
+        $dtCatalog.Load($cmdCatalogQuery.ExecuteReader())
+        
+
+        # Loop over catalog entries; export ISPAC files.
+        Write-Host "Begin Extracting SSIS Projects and Packages from Catalog" 
+        foreach($ci in $dtCatalog)
+        {
+            $cmdExport = New-Object System.Data.SqlClient.SqlCommand
+            $cmdExport.Connection = $catalogDbConnection 
+            $cmdExport.CommandText = $sqlCatalogExport
+            $cmdExport.Parameters.AddWithValue("@folder", $ci.FolderName) | Out-Null
+            $cmdExport.Parameters.AddWithValue("@project", $ci.ProjectName) | Out-Null
+            
+            $bReader = $cmdExport.ExecuteScalar()
+            $zipFileOutputPath = Join-Path -Path $workingPath ($ci.FolderName + "-" + $ci.ProjectName + ".ispac")
+            $zipFilePaths += $zipFileOutputPath
+
+            [System.IO.File]::WriteAllBytes($zipFileOutputPath, [byte[]]$bReader) | Out-Null
+        }
+
+       
+
+        Write-Host "Projects and Packages Extracted to " $workingPath
+    }
+   catch{
+       Write-Error -Message "An error occurred while processing this request."
+       $Error[0]
+   }
+    finally {
+        if($catalogDbConnection.State -eq [System.Data.ConnectionState]::Open){
+            $catalogDbConnection.Close()
+        }        
+    }
+
+
+}
